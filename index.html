@@ -1,0 +1,510 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TIME CONTROLLER</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400;500&family=Bebas+Neue&display=swap');
+
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+  html, body {
+    width: 100%; height: 100%;
+    overflow: hidden;
+    font-family: 'DM Mono', monospace;
+    background: #020510;
+  }
+
+  #bg-layer {
+    position: fixed; inset: 0;
+    z-index: 0;
+    background: linear-gradient(170deg, #020510 0%, #030815 50%, #060d20 100%);
+  }
+
+  #stars-canvas {
+    position: fixed; inset: 0;
+    z-index: 1;
+    pointer-events: none;
+  }
+
+  #ambient-light {
+    position: fixed; inset: 0;
+    z-index: 2;
+    pointer-events: none;
+    opacity: 0;
+  }
+
+  #vignette {
+    position: fixed; inset: 0;
+    z-index: 3;
+    pointer-events: none;
+    background: radial-gradient(ellipse at center, transparent 35%, rgba(0,0,0,0.7) 100%);
+  }
+
+  #scene {
+    position: fixed; inset: 0;
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  #clock-wrapper {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  #clock-glow {
+    position: absolute;
+    inset: -50px;
+    border-radius: 50%;
+    pointer-events: none;
+    background: radial-gradient(circle, rgba(60,100,255,0.3) 0%, transparent 70%);
+    filter: blur(20px);
+  }
+
+  #clock-canvas {
+    display: block;
+    border-radius: 50%;
+    cursor: grab;
+    position: relative;
+    z-index: 11;
+  }
+
+  #clock-canvas:active {
+    cursor: grabbing;
+  }
+
+  #time-display {
+    position: fixed;
+    bottom: 50px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 20;
+    text-align: center;
+    pointer-events: none;
+  }
+
+  #time-text {
+    font-family: 'Bebas Neue', sans-serif;
+    font-size: clamp(40px, 6vw, 80px);
+    letter-spacing: 0.15em;
+    color: rgba(255,255,255,0.9);
+    text-shadow: 0 0 40px rgba(80,140,255,0.8);
+    line-height: 1;
+  }
+
+  #period-text {
+    font-size: 10px;
+    letter-spacing: 0.4em;
+    color: rgba(255,255,255,0.4);
+    text-transform: uppercase;
+    margin-top: 8px;
+  }
+
+  #hint {
+    position: fixed;
+    top: 40px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 20;
+    font-size: 10px;
+    letter-spacing: 0.35em;
+    color: rgba(255,255,255,0.3);
+    text-transform: uppercase;
+    pointer-events: none;
+    transition: opacity 1.5s ease;
+    white-space: nowrap;
+  }
+
+  #period-ind {
+    position: fixed;
+    top: 40px; left: 48px;
+    z-index: 20;
+    font-size: 10px;
+    letter-spacing: 0.3em;
+    color: rgba(255,255,255,0.25);
+    text-transform: uppercase;
+    pointer-events: none;
+  }
+</style>
+</head>
+<body>
+
+<div id="bg-layer"></div>
+<canvas id="stars-canvas"></canvas>
+<div id="ambient-light"></div>
+<div id="vignette"></div>
+
+<div id="scene">
+  <div id="clock-wrapper">
+    <div id="clock-glow"></div>
+    <canvas id="clock-canvas"></canvas>
+  </div>
+</div>
+
+<div id="time-display">
+  <div id="time-text">00:00:00</div>
+  <div id="period-text">night</div>
+</div>
+
+<div id="hint">← drag the clock to control time →</div>
+<div id="period-ind">night</div>
+
+<script>
+(function() {
+  'use strict';
+
+  const TWO_PI = Math.PI * 2;
+
+  // ── Elements ──
+  const clockCanvas = document.getElementById('clock-canvas');
+  const starsCanvas = document.getElementById('stars-canvas');
+  const bgLayer     = document.getElementById('bg-layer');
+  const ambLight    = document.getElementById('ambient-light');
+  const vigEl       = document.getElementById('vignette');
+  const glowEl      = document.getElementById('clock-glow');
+  const timeText    = document.getElementById('time-text');
+  const periodText  = document.getElementById('period-text');
+  const periodInd   = document.getElementById('period-ind');
+  const hintEl      = document.getElementById('hint');
+
+  // ── Clock canvas ──
+  const DPR  = Math.min(window.devicePixelRatio || 1, 2);
+  const SIZE = Math.min(window.innerWidth * 0.52, window.innerHeight * 0.52, 420);
+  const R    = SIZE / 2;
+
+  clockCanvas.width  = SIZE * DPR;
+  clockCanvas.height = SIZE * DPR;
+  clockCanvas.style.width  = SIZE + 'px';
+  clockCanvas.style.height = SIZE + 'px';
+
+  const ctx = clockCanvas.getContext('2d');
+  ctx.scale(DPR, DPR);
+
+  // ── Stars canvas ──
+  starsCanvas.width  = window.innerWidth;
+  starsCanvas.height = window.innerHeight;
+  const sCtx = starsCanvas.getContext('2d');
+
+  // ── State ──
+  let currentTime = getNowSec();
+  let isDragging  = false;
+  let prevAngle   = 0;
+  let velocity    = 0;
+  let velBuf      = [];
+  let prevFrameTs = performance.now();
+  let hintGone    = false;
+
+  // Live atmosphere (lerped each frame)
+  const live = { r:60, g:100, b:180, starOp:1, ambOp:0, vigOp:0.7 };
+
+  // ── Utilities ──
+  function getNowSec() {
+    const d = new Date();
+    return d.getHours()*3600 + d.getMinutes()*60 + d.getSeconds() + d.getMilliseconds()/1000;
+  }
+  function wrap(s) { return ((s % 86400) + 86400) % 86400; }
+  function lerp(a, b, t) { return a + (b - a) * t; }
+  function eio(t)  { return t < 0.5 ? 2*t*t : -1+(4-2*t)*t; }
+  function pad(n)  { return String(n).padStart(2,'0'); }
+  function hexRgb(h) {
+    const n = parseInt(h.replace('#',''), 16);
+    return [(n>>16)&255, (n>>8)&255, n&255];
+  }
+  function lerpRgb(a, b, t) {
+    return [Math.round(lerp(a[0],b[0],t)), Math.round(lerp(a[1],b[1],t)), Math.round(lerp(a[2],b[2],t))];
+  }
+
+  // ── Atmosphere keyframes ──
+  const ATMO = [
+    { t:0,     name:'night',   bg:['#020510','#030815','#060d20'], glow:[60,100,180],  star:1.0, amb:0,    vig:0.7  },
+    { t:14400, name:'dawn',    bg:['#1a0a1e','#3d1832','#c4602a'], glow:[255,130,70],  star:0.2, amb:0.3,  vig:0.45 },
+    { t:21600, name:'morning', bg:['#1a4a7a','#3a85c8','#fad090'], glow:[255,200,120], star:0.0, amb:0.5,  vig:0.2  },
+    { t:43200, name:'noon',    bg:['#1a5fa0','#3090e0','#87ceeb'], glow:[180,220,255], star:0.0, amb:0.45, vig:0.15 },
+    { t:57600, name:'sunset',  bg:['#1a0a0a','#a03020','#ff7030'], glow:[255,110,50],  star:0.1, amb:0.35, vig:0.4  },
+    { t:68400, name:'dusk',    bg:['#0d0520','#1a1040','#3a2070'], glow:[110,80,210],  star:0.6, amb:0.1,  vig:0.6  },
+    { t:79200, name:'night',   bg:['#020510','#030815','#060d20'], glow:[60,100,180],  star:1.0, amb:0,    vig:0.7  },
+    { t:86400, name:'night',   bg:['#020510','#030815','#060d20'], glow:[60,100,180],  star:1.0, amb:0,    vig:0.7  },
+  ];
+
+  function getAtmo(sec) {
+    const t = wrap(sec);
+    let i = ATMO.length - 2;
+    for (let k = 0; k < ATMO.length - 1; k++) {
+      if (t >= ATMO[k].t && t < ATMO[k+1].t) { i = k; break; }
+    }
+    const a = ATMO[i], b = ATMO[i+1];
+    const f = eio((t - a.t) / (b.t - a.t));
+    return {
+      name: f < 0.5 ? a.name : b.name,
+      bg:   a.bg.map((c,j) => lerpRgb(hexRgb(c), hexRgb(b.bg[j]), f)),
+      glow: lerpRgb(a.glow, b.glow, f),
+      star: lerp(a.star, b.star, f),
+      amb:  lerp(a.amb,  b.amb,  f),
+      vig:  lerp(a.vig,  b.vig,  f),
+    };
+  }
+
+  // ── Stars ──
+  const stars = [];
+  (function() {
+    const n = Math.floor(window.innerWidth * window.innerHeight / 2000);
+    for (let i = 0; i < n; i++) {
+      stars.push({
+        x:  Math.random() * window.innerWidth,
+        y:  Math.random() * window.innerHeight,
+        r:  Math.random() * 1.3 + 0.2,
+        a:  Math.random() * 0.75 + 0.15,
+        sp: Math.random() * 0.012 + 0.004,
+        ph: Math.random() * TWO_PI,
+      });
+    }
+  })();
+
+  function drawStars(op, t) {
+    sCtx.clearRect(0, 0, starsCanvas.width, starsCanvas.height);
+    if (op < 0.02) return;
+    for (const s of stars) {
+      sCtx.globalAlpha = s.a * (Math.sin(t * s.sp + s.ph) * 0.3 + 0.7) * op;
+      sCtx.fillStyle = '#fff';
+      sCtx.beginPath();
+      sCtx.arc(s.x, s.y, s.r, 0, TWO_PI);
+      sCtx.fill();
+    }
+    sCtx.globalAlpha = 1;
+  }
+
+  // ── Clock render ──
+  function drawClock(sec) {
+    ctx.clearRect(0, 0, SIZE, SIZE);
+    const cx = R, cy = R;
+    const gr = live.r, gg = live.g, gb = live.b;
+    const gc = (a) => `rgba(${Math.round(gr)},${Math.round(gg)},${Math.round(gb)},${a})`;
+
+    // Face
+    const face = ctx.createRadialGradient(cx - R*0.22, cy - R*0.22, 0, cx, cy, R*0.97);
+    face.addColorStop(0,   gc(0.24));
+    face.addColorStop(0.5, 'rgba(12,18,38,0.82)');
+    face.addColorStop(1,   'rgba(4,6,16,0.96)');
+    ctx.beginPath();
+    ctx.arc(cx, cy, R*0.97, 0, TWO_PI);
+    ctx.fillStyle = face;
+    ctx.fill();
+
+    // Outer border
+    const brd = ctx.createLinearGradient(cx-R, cy-R, cx+R, cy+R);
+    brd.addColorStop(0,    gc(0.8));
+    brd.addColorStop(0.45, 'rgba(255,255,255,0.07)');
+    brd.addColorStop(1,    gc(0.25));
+    ctx.beginPath();
+    ctx.arc(cx, cy, R*0.97, 0, TWO_PI);
+    ctx.strokeStyle = brd;
+    ctx.lineWidth = 1.8;
+    ctx.stroke();
+
+    // Soft inner glow rim
+    ctx.beginPath();
+    ctx.arc(cx, cy, R*0.90, 0, TWO_PI);
+    ctx.strokeStyle = gc(0.07);
+    ctx.lineWidth = 10;
+    ctx.stroke();
+
+    // Inner decorative ring
+    ctx.beginPath();
+    ctx.arc(cx, cy, R*0.30, 0, TWO_PI);
+    ctx.strokeStyle = gc(0.08);
+    ctx.lineWidth = 0.8;
+    ctx.stroke();
+
+    // Ticks + numbers
+    for (let i = 0; i < 60; i++) {
+      const ang = (i/60)*TWO_PI - Math.PI/2;
+      const isH = i % 5 === 0;
+      const r1  = isH ? R*0.74 : R*0.83;
+      ctx.beginPath();
+      ctx.moveTo(cx + Math.cos(ang)*r1,    cy + Math.sin(ang)*r1);
+      ctx.lineTo(cx + Math.cos(ang)*R*0.91, cy + Math.sin(ang)*R*0.91);
+      ctx.strokeStyle = isH ? gc(0.75) : gc(0.20);
+      ctx.lineWidth   = isH ? 1.5 : 0.65;
+      ctx.stroke();
+
+      if (isH) {
+        const num = i === 0 ? '12' : String(i/5);
+        ctx.fillStyle = gc(0.6);
+        ctx.font = `300 ${R*0.086}px 'DM Mono', monospace`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(num, cx + Math.cos(ang)*R*0.62, cy + Math.sin(ang)*R*0.62);
+      }
+    }
+
+    // Hand angles
+    const t  = wrap(sec);
+    const hA = ((t/3600) % 12) / 12  * TWO_PI - Math.PI/2;
+    const mA = ((t % 3600) / 60) / 60 * TWO_PI - Math.PI/2;
+    const sA = (t % 60) / 60           * TWO_PI - Math.PI/2;
+
+    // Hour
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(cx - Math.cos(hA)*R*0.12, cy - Math.sin(hA)*R*0.12);
+    ctx.lineTo(cx + Math.cos(hA)*R*0.50, cy + Math.sin(hA)*R*0.50);
+    ctx.strokeStyle = gc(0.95);
+    ctx.lineWidth = 5.5;
+    ctx.lineCap = 'round';
+    ctx.shadowColor = gc(0.7); ctx.shadowBlur = 14;
+    ctx.stroke();
+    ctx.restore();
+
+    // Minute
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(cx - Math.cos(mA)*R*0.10, cy - Math.sin(mA)*R*0.10);
+    ctx.lineTo(cx + Math.cos(mA)*R*0.73, cy + Math.sin(mA)*R*0.73);
+    ctx.strokeStyle = gc(0.78);
+    ctx.lineWidth = 3;
+    ctx.lineCap = 'round';
+    ctx.shadowColor = gc(0.5); ctx.shadowBlur = 8;
+    ctx.stroke();
+    ctx.restore();
+
+    // Second
+    const sr = Math.round(gg*0.5+120), sg2 = Math.round(gb*0.3+100);
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(cx - Math.cos(sA)*R*0.18, cy - Math.sin(sA)*R*0.18);
+    ctx.lineTo(cx + Math.cos(sA)*R*0.83, cy + Math.sin(sA)*R*0.83);
+    ctx.strokeStyle = `rgba(255,${sr},${sg2},0.95)`;
+    ctx.lineWidth = 1.5;
+    ctx.lineCap = 'round';
+    ctx.shadowColor = `rgba(255,${sr},${sg2},0.8)`; ctx.shadowBlur = 10;
+    ctx.stroke();
+    ctx.restore();
+
+    // Center jewel
+    const cg = ctx.createRadialGradient(cx, cy, 0, cx, cy, R*0.065);
+    cg.addColorStop(0,   'rgba(255,255,255,1)');
+    cg.addColorStop(0.5, gc(0.9));
+    cg.addColorStop(1,   'transparent');
+    ctx.beginPath();
+    ctx.arc(cx, cy, R*0.065, 0, TWO_PI);
+    ctx.fillStyle = cg;
+    ctx.fill();
+  }
+
+  // ── Drag ──
+  function getAngle(e) {
+    const rect = clockCanvas.getBoundingClientRect();
+    const ex = e.touches ? e.touches[0].clientX : e.clientX;
+    const ey = e.touches ? e.touches[0].clientY : e.clientY;
+    return Math.atan2(ey - (rect.top + rect.height/2), ex - (rect.left + rect.width/2));
+  }
+
+  function onStart(e) {
+    e.preventDefault();
+    isDragging = true;
+    prevAngle  = getAngle(e);
+    velocity   = 0;
+    velBuf     = [];
+    if (!hintGone) { hintEl.style.opacity = '0'; hintGone = true; }
+  }
+
+  function onMove(e) {
+    if (!isDragging) return;
+    e.preventDefault();
+    const ang = getAngle(e);
+    let d = ang - prevAngle;
+    if (d >  Math.PI) d -= TWO_PI;
+    if (d < -Math.PI) d += TWO_PI;
+    currentTime = wrap(currentTime + (d / TWO_PI) * 86400);
+    velBuf.push(d);
+    if (velBuf.length > 6) velBuf.shift();
+    prevAngle = ang;
+  }
+
+  function onEnd() {
+    if (!isDragging) return;
+    isDragging = false;
+    velocity = velBuf.length ? velBuf.reduce((a,b)=>a+b,0)/velBuf.length : 0;
+  }
+
+  clockCanvas.addEventListener('mousedown',  onStart, { passive: false });
+  clockCanvas.addEventListener('touchstart', onStart, { passive: false });
+  document.addEventListener('mousemove',  onMove, { passive: false });
+  document.addEventListener('touchmove',  onMove, { passive: false });
+  document.addEventListener('mouseup',    onEnd);
+  document.addEventListener('touchend',   onEnd);
+  document.addEventListener('mouseleave', onEnd);
+
+  // ── Period labels ──
+  const PLABEL = {
+    night:'midnight silence', dawn:'dawn awakening',
+    morning:'morning clarity', noon:'zenith',
+    sunset:'golden hour', dusk:'dusk descent',
+  };
+  let lastPeriod = '';
+
+  let lastUITs = 0;
+  function updateUI(atm, ts) {
+    if (ts - lastUITs < 50) return;
+    lastUITs = ts;
+
+    const [c0,c1,c2] = atm.bg.map(c => `rgb(${c[0]},${c[1]},${c[2]})`);
+    bgLayer.style.background = `linear-gradient(170deg,${c0} 0%,${c1} 50%,${c2} 100%)`;
+    vigEl.style.background   = `radial-gradient(ellipse at center,transparent 35%,rgba(0,0,0,${(live.vigOp*.85).toFixed(2)}) 100%)`;
+    ambLight.style.opacity   = live.ambOp.toFixed(3);
+    ambLight.style.background= `radial-gradient(ellipse at 50% 0%,rgba(${Math.round(live.r)},${Math.round(live.g)},${Math.round(live.b)},0.3) 0%,transparent 65%)`;
+    glowEl.style.background  = `radial-gradient(circle,rgba(${Math.round(live.r)},${Math.round(live.g)},${Math.round(live.b)},0.45) 0%,transparent 70%)`;
+
+    const t = wrap(currentTime);
+    const h = Math.floor(t/3600), m = Math.floor((t%3600)/60), s = Math.floor(t%60);
+    timeText.textContent  = `${pad(h)}:${pad(m)}:${pad(s)}`;
+    timeText.style.textShadow = `0 0 40px rgba(${Math.round(live.r)},${Math.round(live.g)},${Math.round(live.b)},0.9)`;
+
+    if (atm.name !== lastPeriod) {
+      periodText.textContent = PLABEL[atm.name] || atm.name;
+      periodInd.textContent  = atm.name;
+      lastPeriod = atm.name;
+    }
+  }
+
+  // ── Loop ──
+  function loop(ts) {
+    const dt = Math.min((ts - prevFrameTs) / 1000, 0.1);
+    prevFrameTs = ts;
+
+    if (!isDragging) {
+      if (Math.abs(velocity) > 0.0003) {
+        currentTime = wrap(currentTime + (velocity/TWO_PI)*86400);
+        velocity *= 0.91;
+      } else {
+        velocity = 0;
+        currentTime = wrap(currentTime + dt);
+      }
+    }
+
+    const atm = getAtmo(currentTime);
+    const sp = 0.05;
+    live.r      += (atm.glow[0] - live.r)      * sp;
+    live.g      += (atm.glow[1] - live.g)      * sp;
+    live.b      += (atm.glow[2] - live.b)      * sp;
+    live.starOp += (atm.star    - live.starOp)  * sp;
+    live.ambOp  += (atm.amb     - live.ambOp)   * sp;
+    live.vigOp  += (atm.vig     - live.vigOp)   * sp;
+
+    drawStars(live.starOp, ts * 0.001);
+    drawClock(currentTime);
+    updateUI(atm, ts);
+
+    requestAnimationFrame(loop);
+  }
+
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
